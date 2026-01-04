@@ -1,195 +1,260 @@
 export default {
   async fetch(req, env) {
-    const url = new URL(req.url)
-    const path = url.pathname
-    const method = req.method
+    const url = new URL(req.url);
+    const method = req.method;
 
-    const json = (d, s = 200) =>
-      new Response(JSON.stringify(d), { status: s, headers: { "Content-Type": "application/json" } })
+    // ========================
+    // UTIL
+    // ========================
+    const json = (data, status = 200) =>
+      new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
 
-    const html = (b) =>
-      new Response(b, { headers: { "Content-Type": "text/html; charset=utf-8" } })
+    const html = (body) =>
+      new Response(body, { headers: { "Content-Type": "text/html; charset=utf-8" } });
 
-    const hash = async (t) => {
-      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t))
-      return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("")
-    }
+    const hash = async (text) => {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+      return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+    };
 
     const getSession = async () => {
-      const c = req.headers.get("Cookie") || ""
-      const m = c.match(/session=([a-z0-9]+)/)
-      if (!m) return null
-      return env.USERS_KV.get(`session:${m[1]}`)
+      const cookie = req.headers.get("Cookie") || "";
+      const match = cookie.match(/session=([a-z0-9]+)/);
+      if (!match) return null;
+      return env.USERS_KV.get(`session:${match[1]}`);
+    };
+
+    // ========================
+    // LOGIN / REGISTER PAGE
+    // ========================
+    if (url.pathname === "/") {
+      return html(loginPage);
     }
 
-    /* ================= UI LOGIN ================= */
-    if (path === "/") {
-      return html(`
+    // ========================
+    // DASHBOARD PAGE
+    // ========================
+    if (url.pathname === "/dashboard") {
+      const email = await getSession();
+      if (!email) return new Response("", { status: 302, headers: { Location: "/" } });
+      return html(dashboardPage);
+    }
+
+    // ========================
+    // AUTH API
+    // ========================
+    if (url.pathname === "/api/register" && method === "POST") {
+      const { email, password } = await req.json();
+      if (!email || !password) return json({ error: "Email dan password wajib diisi" }, 400);
+
+      if (await env.USERS_KV.get(`user:${email}`))
+        return json({ error: "Email sudah terdaftar" }, 400);
+
+      await env.USERS_KV.put(`user:${email}`, JSON.stringify({
+        email,
+        password: await hash(password),
+        coin: 5
+      }));
+
+      return json({ ok: true });
+    }
+
+    if (url.pathname === "/api/login" && method === "POST") {
+      const { email, password } = await req.json();
+      const raw = await env.USERS_KV.get(`user:${email}`);
+      if (!raw) return json({ error: "Email / password salah" }, 401);
+
+      const user = JSON.parse(raw);
+      if (user.password !== await hash(password))
+        return json({ error: "Email / password salah" }, 401);
+
+      const sid = crypto.randomUUID().replace(/-/g, "");
+      await env.USERS_KV.put(`session:${sid}`, email, { expirationTtl: 86400 });
+
+      return new Response(JSON.stringify({ ok: true }), {
+        headers: {
+          "Set-Cookie": `session=${sid}; HttpOnly; Path=/`,
+          "Content-Type": "application/json"
+        }
+      });
+    }
+
+    if (url.pathname === "/api/me") {
+      const email = await getSession();
+      if (!email) return json({ error: "Unauthorized" }, 401);
+      const u = JSON.parse(await env.USERS_KV.get(`user:${email}`));
+      return json({ email, coin: u.coin });
+    }
+
+    // ========================
+    // SORA WATERMARK REMOVER API
+    // ========================
+    if (url.pathname === "/api/remove" && method === "POST") {
+      const email = await getSession();
+      if (!email) return json({ error: "Unauthorized" }, 401);
+
+      const { video_url } = await req.json();
+      const key = `user:${email}`;
+      const user = JSON.parse(await env.USERS_KV.get(key));
+      if (user.coin < 1) return json({ error: "Coin habis" }, 402);
+
+      user.coin--;
+      await env.USERS_KV.put(key, JSON.stringify(user));
+
+      try {
+        const res = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${env.SORA_API_KEY}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model: "sora-watermark-remover",
+            input: { video_url }
+          })
+        });
+        const data = await res.json();
+        return json(data);
+      } catch (err) {
+        return json({ error: err.message }, 500);
+      }
+    }
+
+    return new Response("Worker Rax AI OK");
+  }
+};
+
+// ========================
+// LOGIN PAGE HTML
+// ========================
+const loginPage = `
 <!DOCTYPE html>
 <html>
 <head>
-<title>Rax AI</title>
+<meta charset="UTF-8">
+<title>Rax AI Login</title>
 <style>
-body{
-  background:#0f0f0f;color:#fff;font-family:Inter,system-ui;
-  display:flex;align-items:center;justify-content:center;height:100vh
-}
-.card{
-  width:320px;background:#161616;padding:24px;border-radius:14px;
-  box-shadow:0 0 30px rgba(0,0,0,.6)
-}
-h2{text-align:center;margin-bottom:20px}
-input,button{
-  width:100%;padding:12px;border-radius:8px;border:none;margin:6px 0
-}
-input{background:#222;color:#fff}
-button{background:#4f46e5;color:#fff;cursor:pointer}
-button:hover{opacity:.9}
-.msg{min-height:20px;text-align:center;font-size:13px;color:#aaa}
+body { font-family:sans-serif; display:flex; justify-content:center; align-items:center; min-height:100vh; background:#121212; color:#fff; }
+.box { background:#1f1f1f; padding:30px; border-radius:10px; width:320px; box-shadow:0 0 20px rgba(0,0,0,0.5); }
+input, button { width:100%; padding:10px; margin:8px 0; border-radius:5px; border:none; font-size:14px; }
+button { background:#4CAF50; color:#fff; cursor:pointer; transition:0.2s; }
+button:hover { background:#45a049; }
+#msg { color:#f44336; margin-top:10px; font-size:14px; }
 </style>
 </head>
 <body>
-<div class="card">
-<h2>Rax AI</h2>
+<div class="box">
+<h2>Rax AI Login</h2>
 <input id="email" placeholder="Email">
 <input id="password" type="password" placeholder="Password">
 <button onclick="login()">Login</button>
 <button onclick="register()">Daftar</button>
-<div class="msg" id="msg"></div>
+<p id="msg"></p>
 </div>
 
 <script>
-async function login(){
-  msg.innerText='Loading...'
-  const r=await fetch('/api/login',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})})
-  r.ok?location='/dashboard':msg.innerText='Login gagal'
+async function login() {
+  const r = await fetch('/api/login',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})});
+  const data = await r.json();
+  if(r.ok){ location='/dashboard'; } else { msg.innerText = data.error; }
 }
-async function register(){
-  msg.innerText='Loading...'
-  const r=await fetch('/api/register',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})})
-  msg.innerText=r.ok?'Daftar berhasil':'Gagal daftar'
+
+async function register() {
+  const r = await fetch('/api/register',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})});
+  const data = await r.json();
+  msg.innerText = r.ok ? 'Daftar sukses, silakan login' : data.error;
 }
 </script>
 </body>
 </html>
-`)
-    }
+`;
 
-    /* ================= DASHBOARD ================= */
-    if (path === "/dashboard") {
-      const email = await getSession()
-      if (!email) return new Response("", { status: 302, headers: { Location: "/" } })
-
-      return html(`
+// ========================
+// DASHBOARD PAGE HTML
+// ========================
+const dashboardPage = `
 <!DOCTYPE html>
 <html>
 <head>
-<title>Dashboard Rax AI</title>
+<meta charset="UTF-8">
+<title>Rax AI Dashboard</title>
 <style>
-body{background:#0b0b0b;color:#fff;font-family:Inter,system-ui;padding:20px}
-.container{max-width:520px;margin:auto}
-.card{
-  background:#151515;padding:20px;border-radius:16px;
-  box-shadow:0 0 20px rgba(0,0,0,.5)
-}
-h2{margin:0 0 10px}
-.info{font-size:13px;color:#aaa;margin-bottom:15px}
-input,button{
-  width:100%;padding:12px;border-radius:10px;border:none;margin:6px 0
-}
-input{background:#222;color:#fff}
-button{background:#22c55e;color:#000;font-weight:600;cursor:pointer}
-button:disabled{opacity:.5}
-pre{
-  background:#000;padding:12px;border-radius:10px;
-  font-size:12px;overflow:auto
-}
+body { font-family:Arial; background:#121212; color:#fff; margin:0; padding:0; }
+header { background:#1f1f1f; padding:20px; text-align:center; font-size:24px; font-weight:bold; }
+.container { max-width:600px; margin:20px auto; padding:20px; background:#1f1f1f; border-radius:10px; box-shadow:0 0 15px rgba(0,0,0,0.5); }
+input { width:100%; padding:10px; margin:8px 0; border-radius:5px; border:none; font-size:14px; }
+button { width:100%; padding:10px; margin:8px 0; border-radius:5px; border:none; background:#4CAF50; color:#fff; cursor:pointer; font-size:16px; transition:0.2s; }
+button:hover { background:#45a049; }
+#status { font-weight:bold; margin-top:10px; }
+video { width:100%; margin-top:20px; border-radius:8px; }
+.user-info { margin-bottom:15px; font-size:14px; color:#ccc; }
 </style>
 </head>
 <body>
+<header>Rax AI Dashboard</header>
 <div class="container">
-<div class="card">
-<h2>Watermark Remover</h2>
-<div class="info" id="info">Loading...</div>
-<input id="url" placeholder="Tempel URL video Sora">
-<button id="btn" onclick="run()">Remove Watermark</button>
-<pre id="out"></pre>
-</div>
+<div class="user-info" id="user-info">Loading user info...</div>
+<input id="video_url" placeholder="Tempel URL video Sora (sora.chatgpt.com)" />
+<button onclick="removeWatermark()">Remove Watermark</button>
+<p id="status"></p>
+<video id="video" controls></video>
 </div>
 
 <script>
-async function me(){
-  const r=await fetch('/api/me')
-  const d=await r.json()
-  info.innerText=\`User: \${d.email} | Coin: \${d.coin}\`
+async function getUser() {
+  const r = await fetch('/api/me');
+  const d = await r.json();
+  if(d.error){ document.getElementById('user-info').innerText=d.error; return; }
+  document.getElementById('user-info').innerText = 'User: ' + d.email + ' | Coin: ' + d.coin;
 }
-me()
 
-async function run(){
-  btn.disabled=true
-  out.innerText='Processing...'
-  const r=await fetch('/api/remove',{method:'POST',body:JSON.stringify({video_url:url.value})})
-  const d=await r.json()
-  out.innerText=JSON.stringify(d,null,2)
-  btn.disabled=false
+async function removeWatermark() {
+  const videoUrl = document.getElementById("video_url").value;
+  if(!videoUrl){ alert("Masukkan URL video!"); return; }
+
+  document.getElementById("status").innerText = "Membuat task...";
+  try {
+    const res = await fetch("/api/remove", {
+      method:"POST",
+      headers:{ "Content-Type":"application/json" },
+      body: JSON.stringify({ video_url: videoUrl })
+    });
+    const data = await res.json();
+    if(data.error){ document.getElementById("status").innerText = data.error; return; }
+    pollTask(data.data.taskId);
+  } catch(err){
+    document.getElementById("status").innerText = "Error: " + err.message;
+  }
 }
+
+function pollTask(taskId){
+  const statusEl = document.getElementById("status");
+  const timer = setInterval(async () => {
+    try {
+      const res = await fetch("/api/status?taskId=" + taskId);
+      const data = await res.json();
+      if(data.error){ clearInterval(timer); statusEl.innerText = data.error; return; }
+
+      if(data.data.state==="success"){
+        clearInterval(timer);
+        const result = JSON.parse(data.data.resultJson);
+        document.getElementById("video").src = result.resultUrls[0];
+        statusEl.innerText = "Selesai";
+        getUser(); // update coin
+      }
+      if(data.data.state==="fail"){
+        clearInterval(timer);
+        statusEl.innerText = "Gagal: " + data.data.failMsg;
+      }
+    } catch(err){
+      clearInterval(timer);
+      statusEl.innerText = "Error: " + err.message;
+    }
+  }, 3000);
+}
+
+getUser();
 </script>
 </body>
 </html>
-`)
-    }
-
-    /* ================= AUTH ================= */
-    if (path === "/api/register" && method === "POST") {
-      const { email, password } = await req.json()
-      if (await env.USERS_KV.get(`user:${email}`)) return json({}, 400)
-      await env.USERS_KV.put(`user:${email}`, JSON.stringify({ email, password: await hash(password), coin: 5 }))
-      return json({ ok: true })
-    }
-
-    if (path === "/api/login" && method === "POST") {
-      const { email, password } = await req.json()
-      const raw = await env.USERS_KV.get(`user:${email}`)
-      if (!raw) return json({}, 401)
-      const u = JSON.parse(raw)
-      if (u.password !== await hash(password)) return json({}, 401)
-      const sid = crypto.randomUUID().replace(/-/g, "")
-      await env.USERS_KV.put(`session:${sid}`, email, { expirationTtl: 86400 })
-      return new Response(JSON.stringify({ ok: true }), {
-        headers: { "Set-Cookie": `session=${sid}; HttpOnly; Path=/` }
-      })
-    }
-
-    if (path === "/api/me") {
-      const email = await getSession()
-      const u = JSON.parse(await env.USERS_KV.get(`user:${email}`))
-      return json({ email, coin: u.coin })
-    }
-
-    /* ================= REMOVE ================= */
-    if (path === "/api/remove" && method === "POST") {
-      const email = await getSession()
-      const key = `user:${email}`
-      const u = JSON.parse(await env.USERS_KV.get(key))
-      if (u.coin < 1) return json({ error: "Coin habis" }, 402)
-      u.coin--
-      await env.USERS_KV.put(key, JSON.stringify(u))
-
-      const r = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.KIE_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model: "sora-watermark-remover",
-          input: { video_url: (await req.json()).video_url }
-        })
-      })
-
-      return json(await r.json())
-    }
-
-    return new Response("Rax AI Worker OK")
-  }
-      }
+`;
