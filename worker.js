@@ -5,10 +5,13 @@ export default {
     const method = req.method
 
     // ========================
-    // UTILS
+    // UTIL
     // ========================
     const json = (data, status = 200) =>
       new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })
+
+    const html = (body) =>
+      new Response(body, { headers: { "Content-Type": "text/html; charset=utf-8" } })
 
     const hash = async (text) => {
       const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
@@ -23,38 +26,129 @@ export default {
     }
 
     // ========================
-    // AUTH
+    // UI
+    // ========================
+    if (path === "/") {
+      return html(`
+<!DOCTYPE html>
+<html>
+<head>
+<title>Rax AI Login</title>
+<style>
+body{font-family:sans-serif;background:#111;color:#fff;display:flex;justify-content:center;align-items:center;height:100vh}
+.box{width:300px}
+input,button{width:100%;margin:5px 0;padding:10px}
+</style>
+</head>
+<body>
+<div class="box">
+<h2>Rax AI</h2>
+<input id="email" placeholder="Email">
+<input id="password" type="password" placeholder="Password">
+<button onclick="login()">Login</button>
+<button onclick="register()">Daftar</button>
+<p id="msg"></p>
+</div>
+
+<script>
+async function login(){
+  const r = await fetch('/api/login',{method:'POST',body:JSON.stringify({
+    email:email.value,password:password.value
+  })})
+  if(r.ok) location='/dashboard'
+  else msg.innerText='Login gagal'
+}
+async function register(){
+  const r = await fetch('/api/register',{method:'POST',body:JSON.stringify({
+    email:email.value,password:password.value
+  })})
+  msg.innerText = r.ok ? 'Daftar sukses, silakan login' : 'Gagal daftar'
+}
+</script>
+</body>
+</html>
+`)
+    }
+
+    if (path === "/dashboard") {
+      const email = await getSession()
+      if (!email) return new Response("", { status: 302, headers: { Location: "/" } })
+
+      return html(`
+<!DOCTYPE html>
+<html>
+<head>
+<title>Dashboard Rax AI</title>
+<style>
+body{font-family:sans-serif;background:#0b0b0b;color:#fff;padding:20px}
+input,button{padding:10px;width:100%}
+.box{max-width:500px;margin:auto}
+</style>
+</head>
+<body>
+<div class="box">
+<h2>Watermark Remover</h2>
+<p id="info">Loading...</p>
+<input id="url" placeholder="URL video Sora">
+<button onclick="run()">Remove Watermark</button>
+<pre id="out"></pre>
+</div>
+
+<script>
+async function me(){
+  const r = await fetch('/api/me')
+  const d = await r.json()
+  info.innerText = 'User: '+d.email+' | Coin: '+d.coin
+}
+me()
+
+async function run(){
+  const r = await fetch('/api/remove',{method:'POST',body:JSON.stringify({
+    video_url:url.value
+  })})
+  const d = await r.json()
+  out.innerText = JSON.stringify(d,null,2)
+}
+</script>
+</body>
+</html>
+`)
+    }
+
+    // ========================
+    // AUTH API
     // ========================
     if (path === "/api/register" && method === "POST") {
       const { email, password } = await req.json()
-      if (!email || !password) return json({ error: "Invalid input" }, 400)
+      if (!email || !password) return json({ error: "Invalid" }, 400)
 
-      const key = `user:${email}`
-      if (await env.USERS_KV.get(key)) return json({ error: "User exists" }, 400)
+      if (await env.USERS_KV.get(`user:${email}`))
+        return json({ error: "Exists" }, 400)
 
-      await env.USERS_KV.put(key, JSON.stringify({
+      await env.USERS_KV.put(`user:${email}`, JSON.stringify({
         email,
         password: await hash(password),
         coin: 5
       }))
 
-      return json({ success: true })
+      return json({ ok: true })
     }
 
     if (path === "/api/login" && method === "POST") {
       const { email, password } = await req.json()
-      const userRaw = await env.USERS_KV.get(`user:${email}`)
-      if (!userRaw) return json({ error: "Invalid login" }, 401)
+      const raw = await env.USERS_KV.get(`user:${email}`)
+      if (!raw) return json({ error: "Invalid" }, 401)
 
-      const user = JSON.parse(userRaw)
-      if (user.password !== await hash(password)) return json({ error: "Invalid login" }, 401)
+      const user = JSON.parse(raw)
+      if (user.password !== await hash(password))
+        return json({ error: "Invalid" }, 401)
 
-      const sessionId = crypto.randomUUID().replace(/-/g, "")
-      await env.USERS_KV.put(`session:${sessionId}`, email, { expirationTtl: 86400 })
+      const sid = crypto.randomUUID().replace(/-/g, "")
+      await env.USERS_KV.put(`session:${sid}`, email, { expirationTtl: 86400 })
 
-      return new Response(JSON.stringify({ success: true }), {
+      return new Response(JSON.stringify({ ok: true }), {
         headers: {
-          "Set-Cookie": `session=${sessionId}; HttpOnly; Path=/; Max-Age=86400`,
+          "Set-Cookie": `session=${sid}; HttpOnly; Path=/`,
           "Content-Type": "application/json"
         }
       })
@@ -63,33 +157,29 @@ export default {
     if (path === "/api/me") {
       const email = await getSession()
       if (!email) return json({ error: "Unauthorized" }, 401)
-
-      const user = JSON.parse(await env.USERS_KV.get(`user:${email}`))
-      return json({ email, coin: user.coin })
+      const u = JSON.parse(await env.USERS_KV.get(`user:${email}`))
+      return json({ email, coin: u.coin })
     }
 
     // ========================
-    // WATERMARK REMOVER
+    // SORA WATERMARK REMOVER
     // ========================
     if (path === "/api/remove" && method === "POST") {
       const email = await getSession()
       if (!email) return json({ error: "Unauthorized" }, 401)
 
       const { video_url } = await req.json()
-      if (!video_url) return json({ error: "Missing video_url" }, 400)
-
       const key = `user:${email}`
       const user = JSON.parse(await env.USERS_KV.get(key))
       if (user.coin < 1) return json({ error: "Coin habis" }, 402)
 
-      // potong coin
-      user.coin -= 1
+      user.coin--
       await env.USERS_KV.put(key, JSON.stringify(user))
 
-      const res = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
+      const r = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
         method: "POST",
         headers: {
-          "Authorization": `Bearer ${env.KIE_API_KEY}`,
+          Authorization: `Bearer ${env.KIE_API_KEY}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
@@ -98,28 +188,9 @@ export default {
         })
       })
 
-      const data = await res.json()
-      return json(data)
+      return json(await r.json())
     }
 
-    if (path === "/api/status") {
-      const email = await getSession()
-      if (!email) return json({ error: "Unauthorized" }, 401)
-
-      const taskId = url.searchParams.get("taskId")
-      if (!taskId) return json({ error: "Missing taskId" }, 400)
-
-      const res = await fetch(
-        `https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${taskId}`,
-        { headers: { "Authorization": `Bearer ${env.KIE_API_KEY}` } }
-      )
-
-      return json(await res.json())
-    }
-
-    // ========================
-    // FALLBACK
-    // ========================
-    return new Response("Rax AI Worker OK", { status: 200 })
+    return new Response("Rax AI Worker OK")
   }
-        }
+}
