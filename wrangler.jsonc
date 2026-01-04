@@ -1,5 +1,5 @@
 {
-  "name": "sora-2-worker",
+  "name": "sora-watermark-remover",
   "main": "worker.js",
   "compatibility_date": "2026-01-04"
 }
