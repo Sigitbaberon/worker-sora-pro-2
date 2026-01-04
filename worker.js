@@ -7,14 +7,17 @@ export default {
     if (url.pathname === "/api/create" && request.method === "POST") {
       const body = await request.json();
 
+      if (!body.video_url) {
+        return new Response(
+          JSON.stringify({ error: "video_url wajib diisi" }),
+          { status: 400, headers: { "Content-Type": "application/json" } }
+        );
+      }
+
       const payload = {
-        model: "sora-2-pro-text-to-video",
+        model: "sora-watermark-remover",
         input: {
-          prompt: body.prompt,
-          aspect_ratio: body.aspect_ratio || "landscape",
-          n_frames: body.n_frames || "10",
-          size: body.size || "high",
-          remove_watermark: true
+          video_url: body.video_url
         }
       };
 
@@ -38,6 +41,7 @@ export default {
     // ================= CHECK STATUS =================
     if (url.pathname === "/api/status") {
       const taskId = url.searchParams.get("taskId");
+
       if (!taskId) {
         return new Response(
           JSON.stringify({ error: "taskId wajib" }),
@@ -71,35 +75,40 @@ const html = `
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Sora 2 Pro Worker</title>
+  <title>Sora Watermark Remover</title>
   <style>
     body { font-family: Arial; max-width: 600px; margin: auto; padding: 20px; }
-    textarea { width: 100%; height: 120px; }
+    input { width: 100%; padding: 8px; }
     button { padding: 10px; margin-top: 10px; }
     video { width: 100%; margin-top: 20px; }
   </style>
 </head>
 <body>
 
-<h3>Sora 2 Pro – Text to Video</h3>
+<h3>Sora Watermark Remover</h3>
 
-<textarea id="prompt" placeholder="Masukkan prompt video..."></textarea>
+<input id="video_url" placeholder="Tempel URL video Sora (sora.chatgpt.com)" />
 <br>
-<button onclick="generate()">Generate</button>
+<button onclick="generate()">Remove Watermark</button>
 
 <p id="status"></p>
 <video id="video" controls></video>
 
 <script>
 async function generate() {
+  const videoUrl = document.getElementById("video_url").value;
+
+  if (!videoUrl) {
+    alert("Masukkan video URL!");
+    return;
+  }
+
   document.getElementById("status").innerText = "Membuat task...";
 
   const res = await fetch("/api/create", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      prompt: document.getElementById("prompt").value
-    })
+    body: JSON.stringify({ video_url: videoUrl })
   });
 
   const data = await res.json();
@@ -107,7 +116,8 @@ async function generate() {
 }
 
 async function poll(taskId) {
-  document.getElementById("status").innerText = "Menunggu hasil...";
+  document.getElementById("status").innerText = "Memproses penghapusan watermark...";
+
   const timer = setInterval(async () => {
     const res = await fetch("/api/status?taskId=" + taskId);
     const data = await res.json();
