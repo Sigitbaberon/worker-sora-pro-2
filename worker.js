@@ -1,143 +1,125 @@
 export default {
-  async fetch(request) {
-    const API_KEY = "2dec405ee7e26b88cbe4afb2738867db";
-    const url = new URL(request.url);
+  async fetch(req, env) {
+    const url = new URL(req.url)
+    const path = url.pathname
+    const method = req.method
 
-    // ================= CREATE TASK =================
-    if (url.pathname === "/api/create" && request.method === "POST") {
-      const body = await request.json();
+    // ========================
+    // UTILS
+    // ========================
+    const json = (data, status = 200) =>
+      new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } })
 
-      if (!body.video_url) {
-        return new Response(
-          JSON.stringify({ error: "video_url wajib diisi" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
-      }
-
-      const payload = {
-        model: "sora-watermark-remover",
-        input: {
-          video_url: body.video_url
-        }
-      };
-
-      const res = await fetch(
-        "https://api.kie.ai/api/v1/jobs/createTask",
-        {
-          method: "POST",
-          headers: {
-            "Authorization": `Bearer ${API_KEY}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify(payload)
-        }
-      );
-
-      return new Response(await res.text(), {
-        headers: { "Content-Type": "application/json" }
-      });
+    const hash = async (text) => {
+      const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
+      return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("")
     }
 
-    // ================= CHECK STATUS =================
-    if (url.pathname === "/api/status") {
-      const taskId = url.searchParams.get("taskId");
+    const getSession = async () => {
+      const cookie = req.headers.get("Cookie") || ""
+      const match = cookie.match(/session=([a-z0-9]+)/)
+      if (!match) return null
+      return env.USERS_KV.get(`session:${match[1]}`)
+    }
 
-      if (!taskId) {
-        return new Response(
-          JSON.stringify({ error: "taskId wajib" }),
-          { status: 400, headers: { "Content-Type": "application/json" } }
-        );
-      }
+    // ========================
+    // AUTH
+    // ========================
+    if (path === "/api/register" && method === "POST") {
+      const { email, password } = await req.json()
+      if (!email || !password) return json({ error: "Invalid input" }, 400)
+
+      const key = `user:${email}`
+      if (await env.USERS_KV.get(key)) return json({ error: "User exists" }, 400)
+
+      await env.USERS_KV.put(key, JSON.stringify({
+        email,
+        password: await hash(password),
+        coin: 5
+      }))
+
+      return json({ success: true })
+    }
+
+    if (path === "/api/login" && method === "POST") {
+      const { email, password } = await req.json()
+      const userRaw = await env.USERS_KV.get(`user:${email}`)
+      if (!userRaw) return json({ error: "Invalid login" }, 401)
+
+      const user = JSON.parse(userRaw)
+      if (user.password !== await hash(password)) return json({ error: "Invalid login" }, 401)
+
+      const sessionId = crypto.randomUUID().replace(/-/g, "")
+      await env.USERS_KV.put(`session:${sessionId}`, email, { expirationTtl: 86400 })
+
+      return new Response(JSON.stringify({ success: true }), {
+        headers: {
+          "Set-Cookie": `session=${sessionId}; HttpOnly; Path=/; Max-Age=86400`,
+          "Content-Type": "application/json"
+        }
+      })
+    }
+
+    if (path === "/api/me") {
+      const email = await getSession()
+      if (!email) return json({ error: "Unauthorized" }, 401)
+
+      const user = JSON.parse(await env.USERS_KV.get(`user:${email}`))
+      return json({ email, coin: user.coin })
+    }
+
+    // ========================
+    // WATERMARK REMOVER
+    // ========================
+    if (path === "/api/remove" && method === "POST") {
+      const email = await getSession()
+      if (!email) return json({ error: "Unauthorized" }, 401)
+
+      const { video_url } = await req.json()
+      if (!video_url) return json({ error: "Missing video_url" }, 400)
+
+      const key = `user:${email}`
+      const user = JSON.parse(await env.USERS_KV.get(key))
+      if (user.coin < 1) return json({ error: "Coin habis" }, 402)
+
+      // potong coin
+      user.coin -= 1
+      await env.USERS_KV.put(key, JSON.stringify(user))
+
+      const res = await fetch("https://api.kie.ai/api/v1/jobs/createTask", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${env.KIE_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model: "sora-watermark-remover",
+          input: { video_url }
+        })
+      })
+
+      const data = await res.json()
+      return json(data)
+    }
+
+    if (path === "/api/status") {
+      const email = await getSession()
+      if (!email) return json({ error: "Unauthorized" }, 401)
+
+      const taskId = url.searchParams.get("taskId")
+      if (!taskId) return json({ error: "Missing taskId" }, 400)
 
       const res = await fetch(
         `https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${taskId}`,
-        {
-          headers: {
-            "Authorization": `Bearer ${API_KEY}`
-          }
+        { headers: { "Authorization": `Bearer ${env.KIE_API_KEY}` } }
+      )
+
+      return json(await res.json())
+    }
+
+    // ========================
+    // FALLBACK
+    // ========================
+    return new Response("Rax AI Worker OK", { status: 200 })
+  }
         }
-      );
-
-      return new Response(await res.text(), {
-        headers: { "Content-Type": "application/json" }
-      });
-    }
-
-    // ================= FRONTEND =================
-    return new Response(html, {
-      headers: { "Content-Type": "text/html" }
-    });
-  }
-};
-
-const html = `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <title>Sora Watermark Remover</title>
-  <style>
-    body { font-family: Arial; max-width: 600px; margin: auto; padding: 20px; }
-    input { width: 100%; padding: 8px; }
-    button { padding: 10px; margin-top: 10px; }
-    video { width: 100%; margin-top: 20px; }
-  </style>
-</head>
-<body>
-
-<h3>Sora Watermark Remover</h3>
-
-<input id="video_url" placeholder="Tempel URL video Sora (sora.chatgpt.com)" />
-<br>
-<button onclick="generate()">Remove Watermark</button>
-
-<p id="status"></p>
-<video id="video" controls></video>
-
-<script>
-async function generate() {
-  const videoUrl = document.getElementById("video_url").value;
-
-  if (!videoUrl) {
-    alert("Masukkan video URL!");
-    return;
-  }
-
-  document.getElementById("status").innerText = "Membuat task...";
-
-  const res = await fetch("/api/create", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ video_url: videoUrl })
-  });
-
-  const data = await res.json();
-  poll(data.data.taskId);
-}
-
-async function poll(taskId) {
-  document.getElementById("status").innerText = "Memproses penghapusan watermark...";
-
-  const timer = setInterval(async () => {
-    const res = await fetch("/api/status?taskId=" + taskId);
-    const data = await res.json();
-
-    if (data.data.state === "success") {
-      clearInterval(timer);
-      const result = JSON.parse(data.data.resultJson);
-      document.getElementById("video").src = result.resultUrls[0];
-      document.getElementById("status").innerText = "Selesai";
-    }
-
-    if (data.data.state === "fail") {
-      clearInterval(timer);
-      document.getElementById("status").innerText =
-        "Gagal: " + data.data.failMsg;
-    }
-  }, 3000);
-}
-</script>
-
-</body>
-</html>
-`;
