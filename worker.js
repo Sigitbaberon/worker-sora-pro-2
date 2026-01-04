@@ -4,7 +4,7 @@ export default {
     const method = req.method;
 
     // ========================
-    // UTIL
+    // UTILS
     // ========================
     const json = (data, status = 200) =>
       new Response(JSON.stringify(data), { status, headers: { "Content-Type": "application/json" } });
@@ -27,9 +27,7 @@ export default {
     // ========================
     // LOGIN / REGISTER PAGE
     // ========================
-    if (url.pathname === "/") {
-      return html(loginPage);
-    }
+    if (url.pathname === "/") return html(loginPage);
 
     // ========================
     // DASHBOARD PAGE
@@ -94,6 +92,10 @@ export default {
       if (!email) return json({ error: "Unauthorized" }, 401);
 
       const { video_url } = await req.json();
+      if (!video_url || !video_url.startsWith("https://sora.chatgpt.com/")) {
+        return json({ error: "URL tidak valid" }, 400);
+      }
+
       const key = `user:${email}`;
       const user = JSON.parse(await env.USERS_KV.get(key));
       if (user.coin < 1) return json({ error: "Coin habis" }, 402);
@@ -112,6 +114,28 @@ export default {
             model: "sora-watermark-remover",
             input: { video_url }
           })
+        });
+        const data = await res.json();
+
+        if (!data.data || !data.data.taskId)
+          return json({ error: "Task gagal dibuat" }, 500);
+
+        return json(data);
+      } catch (err) {
+        return json({ error: err.message }, 500);
+      }
+    }
+
+    // ========================
+    // STATUS API
+    // ========================
+    if (url.pathname === "/api/status") {
+      const taskId = url.searchParams.get("taskId");
+      if (!taskId) return json({ error: "taskId wajib" }, 400);
+
+      try {
+        const res = await fetch(`https://api.kie.ai/api/v1/jobs/recordInfo?taskId=${taskId}`, {
+          headers: { Authorization: `Bearer ${env.SORA_API_KEY}` }
         });
         const data = await res.json();
         return json(data);
@@ -154,13 +178,21 @@ button:hover { background:#45a049; }
 
 <script>
 async function login() {
-  const r = await fetch('/api/login',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})});
+  const r = await fetch('/api/login', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({email:email.value,password:password.value})
+  });
   const data = await r.json();
   if(r.ok){ location='/dashboard'; } else { msg.innerText = data.error; }
 }
 
 async function register() {
-  const r = await fetch('/api/register',{method:'POST',body:JSON.stringify({email:email.value,password:password.value})});
+  const r = await fetch('/api/register', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({email:email.value,password:password.value})
+  });
   const data = await r.json();
   msg.innerText = r.ok ? 'Daftar sukses, silakan login' : data.error;
 }
@@ -186,6 +218,9 @@ input { width:100%; padding:10px; margin:8px 0; border-radius:5px; border:none; 
 button { width:100%; padding:10px; margin:8px 0; border-radius:5px; border:none; background:#4CAF50; color:#fff; cursor:pointer; font-size:16px; transition:0.2s; }
 button:hover { background:#45a049; }
 #status { font-weight:bold; margin-top:10px; }
+#status.loading { color:#ff9800; }
+#status.success { color:#4caf50; }
+#status.error { color:#f44336; }
 video { width:100%; margin-top:20px; border-radius:8px; }
 .user-info { margin-bottom:15px; font-size:14px; color:#ccc; }
 </style>
@@ -195,12 +230,16 @@ video { width:100%; margin-top:20px; border-radius:8px; }
 <div class="container">
 <div class="user-info" id="user-info">Loading user info...</div>
 <input id="video_url" placeholder="Tempel URL video Sora (sora.chatgpt.com)" />
-<button onclick="removeWatermark()">Remove Watermark</button>
+<button id="remove-btn" onclick="removeWatermark()">Remove Watermark</button>
+<button onclick="logout()">Logout</button>
 <p id="status"></p>
 <video id="video" controls></video>
 </div>
 
 <script>
+const statusEl = document.getElementById("status");
+const btn = document.getElementById("remove-btn");
+
 async function getUser() {
   const r = await fetch('/api/me');
   const d = await r.json();
@@ -212,7 +251,10 @@ async function removeWatermark() {
   const videoUrl = document.getElementById("video_url").value;
   if(!videoUrl){ alert("Masukkan URL video!"); return; }
 
-  document.getElementById("status").innerText = "Membuat task...";
+  statusEl.innerText = "Membuat task...";
+  statusEl.className = "loading";
+  btn.disabled = true;
+
   try {
     const res = await fetch("/api/remove", {
       method:"POST",
@@ -220,37 +262,70 @@ async function removeWatermark() {
       body: JSON.stringify({ video_url: videoUrl })
     });
     const data = await res.json();
-    if(data.error){ document.getElementById("status").innerText = data.error; return; }
+
+    if(data.error){ 
+      statusEl.innerText = data.error; 
+      statusEl.className = "error";
+      btn.disabled = false;
+      return; 
+    }
+
+    if(!data.data || !data.data.taskId){
+      statusEl.innerText = "Task gagal dibuat";
+      statusEl.className = "error";
+      btn.disabled = false;
+      return;
+    }
+
     pollTask(data.data.taskId);
+
   } catch(err){
-    document.getElementById("status").innerText = "Error: " + err.message;
+    statusEl.innerText = "Error: " + err.message;
+    statusEl.className = "error";
+    btn.disabled = false;
   }
 }
 
 function pollTask(taskId){
-  const statusEl = document.getElementById("status");
+  statusEl.innerText = "Memproses penghapusan watermark...";
+  statusEl.className = "loading";
+
   const timer = setInterval(async () => {
     try {
       const res = await fetch("/api/status?taskId=" + taskId);
       const data = await res.json();
-      if(data.error){ clearInterval(timer); statusEl.innerText = data.error; return; }
+
+      if(data.error){ clearInterval(timer); statusEl.innerText=data.error; statusEl.className="error"; btn.disabled=false; return; }
 
       if(data.data.state==="success"){
         clearInterval(timer);
         const result = JSON.parse(data.data.resultJson);
         document.getElementById("video").src = result.resultUrls[0];
-        statusEl.innerText = "Selesai";
+        statusEl.innerText = "Selesai (URL sudah dicopy)";
+        statusEl.className = "success";
+        navigator.clipboard.writeText(result.resultUrls[0]);
+        btn.disabled = false;
         getUser(); // update coin
       }
+
       if(data.data.state==="fail"){
         clearInterval(timer);
         statusEl.innerText = "Gagal: " + data.data.failMsg;
+        statusEl.className = "error";
+        btn.disabled = false;
       }
     } catch(err){
       clearInterval(timer);
       statusEl.innerText = "Error: " + err.message;
+      statusEl.className = "error";
+      btn.disabled = false;
     }
   }, 3000);
+}
+
+function logout(){
+  document.cookie = "session=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;";
+  location="/";
 }
 
 getUser();
